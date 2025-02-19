@@ -1,98 +1,132 @@
-import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+import pandas as pd
 import time
 
 
-# Function to fetch HTML content using Selenium
-def fetch_html_with_selenium(url):
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")  # Run in headless mode
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+def initialize_driver():
+    """Initialize the Selenium WebDriver with options."""
+    chrome_options = Options()
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")  # Bypass bot detection
+    chrome_options.add_argument("start-maximized")  # Open in full-screen mode
 
-    # Set up WebDriver
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    driver.get(url)
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=chrome_options)
 
-    # Wait for the table to load inside the scrollable div
+
+def scroll_page(driver, times=10):
+    """Scroll down the page to load dynamic content."""
+    body = driver.find_element(By.TAG_NAME, "body")
+    for _ in range(times):
+        body.send_keys(Keys.PAGE_DOWN)
+        time.sleep(1)
+    time.sleep(5)  # Allow JavaScript to load
+
+
+def extract_table_data(soup):
+    """Extracts table-based data if present."""
+    tables = soup.find_all("table")
+    extracted_data = []
+
+    for table in tables:
+        headers = [th.text.strip() for th in table.find_all("th")]
+        rows = []
+
+        tbody = table.find("tbody")
+        if tbody:
+            for row in tbody.find_all("tr"):
+                cells = [td.text.strip() for td in row.find_all("td")]
+                if cells:
+                    rows.append(cells)
+
+        if rows:
+            extracted_data.append(pd.DataFrame(rows, columns=headers if headers else None))
+
+    return extracted_data
+
+
+def extract_div_data(soup):
+    """Extracts div-based data like DemandStar."""
+    bid_listings = soup.find_all("div", class_="listGroupWrapper clearfix")
+    extracted_data = []
+
+    for bid in bid_listings:
+        title_tag = bid.find("a", class_="mw-75 text-truncate")
+        title = title_tag.text.strip() if title_tag else "N/A"
+        link = title_tag["href"] if title_tag else "N/A"
+
+        status_tag = bid.find("span")
+        status = status_tag.text.strip() if status_tag else "N/A"
+
+        agency_tag = bid.find("p")
+        agency = agency_tag.text.strip() if agency_tag else "N/A"
+
+        bid_info = bid.find_all("li", class_="list-inline-item")
+        bid_id, due_date, broadcast_date, planholders = "N/A", "N/A", "N/A", "N/A"
+
+        for info in bid_info:
+            text = info.text.strip()
+            if "ID:" in text:
+                bid_id = text.replace("ID:", "").strip()
+            elif "Due:" in text:
+                due_date = text.replace("Due:", "").strip()
+            elif "Broadcast:" in text:
+                broadcast_date = text.replace("Broadcast:", "").strip()
+            elif "#Planholders:" in text:
+                planholders = text.replace("#Planholders:", "").strip()
+
+        extracted_data.append([title, link, status, agency, bid_id, due_date, broadcast_date, planholders])
+
+    return pd.DataFrame(extracted_data,
+                        columns=["Title", "Link", "Status", "Agency", "Bid ID", "Due Date", "Broadcast Date",
+                                 "Planholders"]) if extracted_data else None
+
+
+def extract_web_data(url):
+    """Extracts structured data from a webpage and saves it to an Excel file."""
+    driver = initialize_driver()
+
     try:
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.ID, "DataTables_Table_0"))
-        )
-        time.sleep(5)  # Extra wait for JavaScript to load data
+        driver.get(url)
+        print(f"\n🔄 Loading: {url}")
 
-        # **Scroll inside the table container**
-        scroll_div = driver.find_element(By.CLASS_NAME, "dataTables_scrollBody")
-        driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", scroll_div)
-        time.sleep(3)  # Wait for additional rows to load
+        # Scroll down to ensure content is loaded
+        scroll_page(driver)
+        # Get the page source after JavaScript execution
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        # Try extracting data in a tabular format
+        table_data = extract_table_data(soup)
+
+        if table_data:
+            print("✅ Extracted table-based data.")
+            with pd.ExcelWriter("extracted_data.xlsx") as writer:
+                for i, df in enumerate(table_data):
+                    df.to_excel(writer, sheet_name=f"Table_{i + 1}", index=False)
+
+        # If no table found, try extracting div-based data
+        else:
+            print("⚠️ No tables found. Trying div-based extraction...")
+            div_data = extract_div_data(soup)
+            if div_data is not None:
+                div_data.to_excel("extracted_data.xlsx", index=False)
+                print("✅ Extracted div-based data.")
+
+        print("\n✅ Data successfully extracted and saved to 'extracted_data.xlsx'")
+
     finally:
-        html_content = driver.page_source
         driver.quit()
 
-    return html_content
 
-
-# Function to extract table data dynamically from any website
-def extract_table_from_url(url):
-    print(f"Extracting data from: {url}")
-
-    html_content = fetch_html_with_selenium(url)
-
-    if not html_content:
-        print("Failed to retrieve content.")
-        return
-
-    # Parse the HTML content using BeautifulSoup
-    soup = BeautifulSoup(html_content, 'html.parser')
-
-    # Locate the specific table by ID
-    table = soup.find("table", {"id": "DataTables_Table_0"})
-    if not table:
-        print(" Table with ID 'DataTables_Table_0' not found.")
-        return
-
-    print(" Table found. Extracting data...")
-
-    # Extract table headers dynamically (if available)
-    headers = [th.text.strip() for th in table.find_all("th")]
-
-    # If headers are missing, create generic headers
-    first_row = table.find("tbody").find("tr")
-    if not headers and first_row:
-        num_columns = len(first_row.find_all("td"))
-        headers = [f"Column {i + 1}" for i in range(num_columns)]
-
-    # Extract table rows
-    data = []
-    tbody = table.find("tbody")
-    rows = tbody.find_all("tr") if tbody else []
-
-    if not rows:
-        print("No table rows found. The table might be empty or dynamically loaded.")
-        return
-
-    print(f"Found {len(rows)} rows in the table.")
-
-    for row in rows:
-        columns = row.find_all("td")
-        if columns:
-            data.append([col.text.strip() for col in columns])
-
-    # Convert data into a pandas DataFrame
-    df = pd.DataFrame(data, columns=headers)
-
-    # Save the extracted data to an Excel file
-    df.to_excel("output.xlsx", index=False)
-    print("Data successfully saved to output.xlsx")
-
-
-# Run the script dynamically for any URL
-if __name__ == "__main__":
-    url = input("Enter the URL to extract data from: ")
-    extract_table_from_url(url)
+# Get the URL from the user
+url = input("Enter the URL of the webpage: ")
+extract_web_data(url)
